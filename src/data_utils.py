@@ -15,13 +15,13 @@ FEATURE_COLS = [
 TARGET_COL = "pixel4|1large|float"
 
 
-def load_and_preprocess(path="../data/tflite_cnn_synthetic_ops_cpu.csv", target_col=None):
+def load_and_preprocess(path="../data/tflite_cnn_synthetic_ops_cpu.csv", target_col=None, op_type="CONV_2D"):
     if target_col is None:
         target_col = TARGET_COL
 
     df = pd.read_csv(path)
 
-    df = df[df["operation"] == "CONV_2D"]
+    df = df[df["operation"] == op_type]
 
     features = df["feature"].apply(ast.literal_eval).apply(pd.Series)
 
