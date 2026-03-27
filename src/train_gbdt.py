@@ -17,9 +17,10 @@ gbdt_fixed_params = {"random_state": 42, "n_jobs": -1, "verbosity": -1}
 
 gbdt_hyperparams = {
     "n_estimators": [100, 300, 500],
-    "max_depth": [5, 10, -1],
+    "max_depth": [5, 10, -1],#look for deeper depthsm since GBDT can overfit less than RF(50 or 100)
     "learning_rate": [0.01, 0.05, 0.1],
     "num_leaves": [31, 63, 255],
+    #add num_iterations to a higher valiue, "learing rate" %error doesnt make sense
 }
 
 print("=" * 60)

@@ -16,8 +16,8 @@ X_train, X_test, y_train, y_test = train_test_split(
 rf_fixed_params = {"random_state": 42, "n_jobs": -1}
 
 rf_hyperparams = {
-    "n_estimators": [100, 300, 500],
-    "max_depth": [10, 50, None],
+    "n_estimators": [50,100, 300, 500],#no more then 40
+    "max_depth": [10, 50, None],# no more then 800
     "max_features": [0.5, 0.75, 1.0],
 }
 

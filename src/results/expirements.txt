@@ -1,0 +1,12 @@
+pixel4|3med|quant              CONV_2D              GBDT       14.62%  1884.5s learning_rate
+pixel4|1large1med|quant        CONV_2D              RF          9.51%    24.6s max_depth
+pixel4|1large1med|quant        CONV_2D              GBDT       10.47%  1906.4s learning_rate
+pixel4|1small|quant            CONV_2D              RF          6.51%    24.1s max_depth
+pixel4|1small|quant            CONV_2D              GBDT        6.58%  1921.1s learning_rate
+pixel4|2small|quant            CONV_2D              RF          8.23%    24.4s max_depth
+pixel4|2small|quant            CONV_2D              GBDT        8.38%  1909.6s learning_rate
+pixel4|3small|quant            CONV_2D              RF         10.30%    24.9s max_depth
+pixel4|3small|quant            CONV_2D              GBDT       10.30%  1898.1s learning_rate
+pixel4|4small|quant            CONV_2D              RF         18.38%    24.9s max_depth
+pixel4|4small|quant            CONV_2D              GBDT       18.32%  1912.7s learning_rate
+

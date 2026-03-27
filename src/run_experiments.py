@@ -33,17 +33,19 @@ OP_TYPES = ["CONV_2D", "FULLY_CONNECTED"]
 
 RF_FIXED = {"random_state": 42, "n_jobs": -1}
 RF_HYPERPARAMS = {
-    "n_estimators": [50, 100, 200, 300, 500, 800],
-    "max_depth": [5, 10, 20, 50, 100, None],
-    "max_features": [0.3, 0.5, 0.6, 0.75, 0.9, 1.0],
+     "n_estimators": [50,100, 300, 500],#no more then 40
+    "max_depth": [10, 50, None],# no more then 800
+    "max_features": [0.5, 0.75, 1.0],
 }
 
 GBDT_FIXED = {"random_state": 42, "n_jobs": -1, "verbosity": -1}
 GBDT_HYPERPARAMS = {
-    "n_estimators": [50, 100, 200, 300, 500],
-    "max_depth": [3, 5, 7, 10, 15, -1],
-    "learning_rate": [0.005, 0.01, 0.05, 0.1, 0.2],
-    "num_leaves": [15, 31, 63, 127, 255],
+    "n_estimators": [100, 300, 500],
+    "max_depth": [5, 10, 50,100-1],#look for deeper depthsm since GBDT can overfit less than RF(50 or 100)
+    "learning_rate": [0.01, 0.05, 0.1],
+    "num_leaves": [31, 63, 255],
+    #add num_iterations to a higher valiue, "learing rate" %error doesnt make sense
+    "num_iterations": [100, 200, 400, 500],
 }
 
 MODELS = {
@@ -175,4 +177,22 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    output_path = "../results/experiments.txt"
+    import os
+    os.makedirs("../results", exist_ok=True)
+
+    import builtins
+    _real_print = builtins.print
+
+    with open(output_path, "w") as f:
+        def _file_print(*args, **kwargs):
+            kwargs.pop("file", None)
+            _real_print(*args, **kwargs, file=f, flush=True)
+
+        builtins.print = _file_print
+        try:
+            main()
+        finally:
+            builtins.print = _real_print
+
+    _real_print("Done! Results saved to", output_path)
