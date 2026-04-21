@@ -1,13 +1,16 @@
+import os
+import joblib
 from lightgbm import LGBMRegressor
 from sklearn.model_selection import train_test_split, GridSearchCV
 
-from data_utils import load_and_preprocess
+from data_utils import load_and_preprocess, TARGET_COL
 from evaluate import mape
 from tune_utils import sensitivity_analysis
 
 import time
 
-X, y = load_and_preprocess()
+OP_TYPE = "CONV_2D"
+X, y = load_and_preprocess(op_type=OP_TYPE)
 
 X_train, X_test, y_train, y_test = train_test_split(
     X, y, test_size=0.2, random_state=42
@@ -86,3 +89,10 @@ print(f"Best CV MAPE: {-grid.best_score_ * 100:.2f}%")
 print(f"Test MAPE: {mape(y_test, test_pred):.2f}%")
 print(f"\nSensitivity analysis time: {sensitivity_time:.2f} seconds")
 print(f"Combined GridSearchCV time: {grid_time:.2f} seconds")
+
+col_safe = TARGET_COL.replace("|", "_")
+models_dir = "../models"
+os.makedirs(models_dir, exist_ok=True)
+model_path = os.path.join(models_dir, f"gbdt_{OP_TYPE}_{col_safe}.joblib")
+joblib.dump(best_model, model_path)
+print(f"\nModel saved to {model_path}")

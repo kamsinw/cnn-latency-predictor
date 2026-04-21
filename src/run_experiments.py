@@ -1,3 +1,5 @@
+import os
+import joblib
 from sklearn.ensemble import RandomForestRegressor
 from sklearn.model_selection import train_test_split, GridSearchCV
 from lightgbm import LGBMRegressor
@@ -7,6 +9,8 @@ from evaluate import mape
 from tune_utils import sensitivity_analysis
 
 import time
+
+MODELS_DIR = "../models"
 
 PIXEL4_COLUMNS = [
     "pixel4|1large|float",
@@ -153,6 +157,12 @@ def main():
                 print(f"  Best CV MAPE: {-grid.best_score_ * 100:.2f}%")
                 print(f"  Test MAPE: {test_mape:.2f}%")
                 print(f"  Sensitivity time: {sensitivity_time:.2f}s  |  GridSearchCV time: {grid_time:.2f}s")
+
+                os.makedirs(MODELS_DIR, exist_ok=True)
+                col_safe = col.replace("|", "_")
+                model_path = os.path.join(MODELS_DIR, f"{model_name.lower()}_{op_type}_{col_safe}.joblib")
+                joblib.dump(best_model, model_path)
+                print(f"  Model saved -> {model_path}")
 
                 most_sensitive = max(analysis, key=lambda p: analysis[p]["worst_err"] - analysis[p]["best_err"])
 
