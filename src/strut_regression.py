@@ -101,11 +101,26 @@ def _distribution_divergence(src_mean_l, src_mean_r, y_target_l, y_target_r, sca
     return (n_l / n) * div_l + (n_r / n) * div_r
 
 
+def _score_threshold(t, x_phi, y_node, src_mean_l, src_mean_r,
+                     scale, lambda_div, use_divergence):
+    """Score a single threshold candidate. Used by _find_best_threshold."""
+    left_mask  = x_phi <= t
+    right_mask = ~left_mask
+    y_l = y_node[left_mask]
+    y_r = y_node[right_mask]
+    if len(y_l) == 0 or len(y_r) == 0:
+        return -np.inf
+    gain = _variance_reduction(y_node, y_l, y_r)
+    if use_divergence:
+        div = _distribution_divergence(src_mean_l, src_mean_r, y_l, y_r, scale)
+        return (1.0 - lambda_div) * gain - lambda_div * div * scale
+    return gain
+
+
 def _find_best_threshold(X_node, y_node, phi,
                          src_mean_l, src_mean_r, src_threshold,
                          lambda_div=0.5, use_divergence=True):
-
-    x_phi      = X_node[:, phi]
+    x_phi       = X_node[:, phi]
     unique_vals = np.unique(x_phi)
 
     if len(unique_vals) < 2:
@@ -113,29 +128,18 @@ def _find_best_threshold(X_node, y_node, phi,
 
     scale = y_node.std() if len(y_node) > 1 else 1.0
 
-    # Candidate thresholds: midpoints between consecutive unique values
+    # Score the source threshold first — use it as the baseline to beat
+    src_score  = _score_threshold(src_threshold, x_phi, y_node,
+                                  src_mean_l, src_mean_r,
+                                  scale, lambda_div, use_divergence)
+    best_score     = src_score
+    best_threshold = src_threshold   # fallback: keep source if nothing beats it
+
     candidates = (unique_vals[:-1] + unique_vals[1:]) / 2.0
-
-    best_score     = -np.inf
-    best_threshold = src_threshold
-
     for t in candidates:
-        left_mask = x_phi <= t
-        right_mask = ~left_mask
-        y_l = y_node[left_mask]
-        y_r = y_node[right_mask]
-
-        if len(y_l) == 0 or len(y_r) == 0:
-            continue
-
-        gain = _variance_reduction(y_node, y_l, y_r)
-
-        if use_divergence:
-            div   = _distribution_divergence(src_mean_l, src_mean_r, y_l, y_r, scale)
-            score = (1.0 - lambda_div) * gain - lambda_div * div * scale
-        else:
-            score = gain
-
+        score = _score_threshold(t, x_phi, y_node,
+                                 src_mean_l, src_mean_r,
+                                 scale, lambda_div, use_divergence)
         if score > best_score:
             best_score     = score
             best_threshold = t
@@ -145,15 +149,24 @@ def _find_best_threshold(X_node, y_node, phi,
 
 
 def _strut_node(dtree, node_index, X_node, y_node,
-                min_samples_leaf=5, lambda_div=0.5, use_divergence=True,
+                K_total, tau=0.1,
+                lambda_div=0.5, use_divergence=True,
                 stats=None):
-    
-    tree = dtree.tree_
+    """
+    Recursively apply Regression-STRUT to one node.
+
+    tau controls selectivity: a node is only updated if the fraction of the
+    total K target samples reaching it is >= tau.  Nodes below the threshold
+    are traversed with the original (frozen) threshold so routing is preserved,
+    but their split and leaf values are left unchanged.
+    """
+    tree    = dtree.tree_
     is_leaf = tree.children_left[node_index] == _TREE_LEAF
 
+    # --- Leaf node ---
     if is_leaf:
         if len(y_node) > 0:
-            tree.value[node_index, 0, 0] = y_node.mean()
+            tree.value[node_index, 0, 0]             = y_node.mean()
             tree.n_node_samples[node_index]          = len(y_node)
             tree.weighted_n_node_samples[node_index] = float(len(y_node))
             if stats is not None:
@@ -163,19 +176,35 @@ def _strut_node(dtree, node_index, X_node, y_node,
                 stats["leaves_unchanged"] += 1
         return
 
-    # Prune if not enough target data to make a meaningful split
-    if len(y_node) < min_samples_leaf:
-        _prune_subtree(tree, node_index)
-        if stats is not None:
-            stats["nodes_pruned"] += 1
+    phi           = tree.feature[node_index]
+    src_threshold = tree.threshold[node_index]
+    left_child    = tree.children_left[node_index]
+    right_child   = tree.children_right[node_index]
+
+    # coverage = fraction of all K samples that reached this node
+    coverage = len(y_node) / K_total if K_total > 0 else 0.0
+
+    if coverage < tau or len(y_node) == 0:
+        # Not enough target data here — keep this node frozen, but still
+        # recurse into children using the ORIGINAL threshold so leaf updates
+        # can happen deeper down where coverage may be sufficient.
+        if len(y_node) > 0:
+            left_mask  = X_node[:, phi] <= src_threshold
+            right_mask = ~left_mask
+            _strut_node(dtree, left_child,
+                        X_node[left_mask],  y_node[left_mask],
+                        K_total, tau, lambda_div, use_divergence, stats)
+            _strut_node(dtree, right_child,
+                        X_node[right_mask], y_node[right_mask],
+                        K_total, tau, lambda_div, use_divergence, stats)
+        else:
+            if stats is not None:
+                stats["leaves_unchanged"] += 1
         return
 
-    phi             = tree.feature[node_index]
-    src_threshold   = tree.threshold[node_index]
-    left_child      = tree.children_left[node_index]
-    right_child     = tree.children_right[node_index]
-    src_mean_l      = tree.value[left_child,  0, 0]
-    src_mean_r      = tree.value[right_child, 0, 0]
+    # --- Coverage met: update this node ---
+    src_mean_l = tree.value[left_child,  0, 0]
+    src_mean_r = tree.value[right_child, 0, 0]
 
     new_threshold = _find_best_threshold(
         X_node, y_node, phi,
@@ -194,31 +223,62 @@ def _strut_node(dtree, node_index, X_node, y_node,
 
     _strut_node(dtree, left_child,
                 X_node[left_mask],  y_node[left_mask],
-                min_samples_leaf, lambda_div, use_divergence, stats)
+                K_total, tau, lambda_div, use_divergence, stats)
     _strut_node(dtree, right_child,
                 X_node[right_mask], y_node[right_mask],
-                min_samples_leaf, lambda_div, use_divergence, stats)
+                K_total, tau, lambda_div, use_divergence, stats)
 
+
+
+def global_scale_rf(rf_source, y_source, y_target_small):
+    """
+    Pre-scale all leaf values by median(y_target) / median(y_source).
+    Corrects the systematic offset between source and target before
+    any structural adaptation, reducing the damage noisy threshold
+    searches can cause at small K.
+
+    Returns a deep copy of rf_source with scaled leaf values.
+    """
+    ratio = np.median(y_target_small) / np.median(y_source)
+    rf_scaled = copy.deepcopy(rf_source)
+    for tree in rf_scaled.estimators_:
+        if not tree.tree_.value.flags.writeable:
+            tree.tree_.value.flags.writeable = True
+        tree.tree_.value[:, 0, 0] *= ratio
+    print(f"  Global scale ratio: {ratio:.4f}  "
+          f"(median src={np.median(y_source):.1f}, "
+          f"median tgt={np.median(y_target_small):.1f})", flush=True)
+    return rf_scaled
 
 
 def strut_regression_rf(rf_source, X_target, y_target,
-                         min_samples_leaf=5, lambda_div=0.5,
-                         use_divergence=True):
-   
+                         y_source=None,
+                         tau=0.1, lambda_div=0.5,
+                         use_divergence=True, global_scale=True):
+    """
+    Apply Regression-STRUT with selective path updates to every tree.
+
+    
+    """
     X_target = np.asarray(X_target)
     y_target = np.asarray(y_target)
+    K_total  = len(y_target)
 
-    rf_adapted = copy.deepcopy(rf_source)
+    # Step 1: global scale correction (Fix 3)
+    if global_scale and y_source is not None:
+        rf_start = global_scale_rf(rf_source, y_source, y_target)
+    else:
+        rf_start = rf_source
 
-    agg = {"leaves_updated": 0, "leaves_unchanged": 0,
-           "nodes_updated": 0,  "nodes_pruned": 0}
+    rf_adapted = copy.deepcopy(rf_start)
+
+    agg = {"leaves_updated": 0, "leaves_unchanged": 0, "nodes_updated": 0}
 
     for dtree in rf_adapted.estimators_:
         _make_writeable(dtree)
-        stats = {"leaves_updated": 0, "leaves_unchanged": 0,
-                 "nodes_updated":  0, "nodes_pruned":     0}
+        stats = {"leaves_updated": 0, "leaves_unchanged": 0, "nodes_updated": 0}
         _strut_node(dtree, 0, X_target, y_target,
-                    min_samples_leaf=min_samples_leaf,
+                    K_total=K_total, tau=tau,
                     lambda_div=lambda_div,
                     use_divergence=use_divergence,
                     stats=stats)
@@ -232,8 +292,6 @@ def strut_regression_rf(rf_source, X_target, y_target,
           f"(avg {agg['leaves_unchanged'] / n:.1f}/tree)", flush=True)
     print(f"  Internal updated : {agg['nodes_updated']:5d}  "
           f"(avg {agg['nodes_updated']   / n:.1f}/tree)", flush=True)
-    print(f"  Nodes pruned     : {agg['nodes_pruned']:5d}  "
-          f"(avg {agg['nodes_pruned']    / n:.1f}/tree)", flush=True)
 
     return rf_adapted
 
@@ -241,17 +299,13 @@ def strut_regression_rf(rf_source, X_target, y_target,
 
 def k_sweep_comparison(rf_source,
                         X_cal, y_cal, X_test, y_test,
+                        y_source=None,
                         k_values=None, alpha=1.0,
-                        min_samples_leaf=5, lambda_div=0.5):
+                        tau=0.1, lambda_div=0.5):
     """
-    Compare three models across K values:
-      - Source model (no transfer)
-      - Leaf re-targeting (transfer_rf)
-      - Regression-STRUT (this file)
+    Compare leaf re-targeting vs Regression-STRUT (selective) across K values.
 
-    Returns
-    -------
-    dict with keys 'k_values', 'leaf_errors', 'strut_errors', 'baseline'
+    Returns dict with keys 'k_values', 'leaf_errors', 'strut_errors', 'baseline'.
     """
     if k_values is None:
         k_values = [10, 25, 50, 100, 200, 500, 1000]
@@ -266,7 +320,7 @@ def k_sweep_comparison(rf_source,
     for k in k_values:
         Xk, yk = X_cal[:k], y_cal[:k]
 
-        print(f"\n── K = {k} ──────────────────────────────", flush=True)
+        print(f"\n── K = {k}  (tau={tau}) ──────────────────────────", flush=True)
 
         print("  [Leaf re-targeting]", flush=True)
         rf_leaf = retarget_random_forest(rf_source, Xk, yk, alpha=alpha)
@@ -274,10 +328,10 @@ def k_sweep_comparison(rf_source,
                                   label=f"Leaf K={k}")["mape"]
         leaf_errors.append(leaf_m)
 
-        print("  [Regression-STRUT]", flush=True)
+        print("  [Regression-STRUT (selective)]", flush=True)
         rf_strut = strut_regression_rf(rf_source, Xk, yk,
-                                        min_samples_leaf=min_samples_leaf,
-                                        lambda_div=lambda_div)
+                                        y_source=y_source,
+                                        tau=tau, lambda_div=lambda_div)
         strut_m  = evaluate_model(rf_strut, X_test, y_test,
                                    label=f"STRUT K={k}")["mape"]
         strut_errors.append(strut_m)
@@ -290,17 +344,19 @@ def k_sweep_comparison(rf_source,
     }
 
 
-def plot_comparison(results, source_col, target_col, save_path=None):
-    """Plot MAPE vs K for all three methods."""
-    k     = results["k_values"]
+def plot_comparison(results, source_col, target_col, tau=None, save_path=None):
+    """Plot MAPE vs K for leaf re-targeting vs Regression-STRUT."""
+    k   = results["k_values"]
+    tau_str = f"  (tau={tau})" if tau is not None else ""
     fig, ax = plt.subplots(figsize=(8, 4.5))
     ax.plot(k, results["leaf_errors"],  marker="o", linewidth=2, label="Leaf re-targeting")
-    ax.plot(k, results["strut_errors"], marker="s", linewidth=2, label="Regression-STRUT")
+    ax.plot(k, results["strut_errors"], marker="s", linewidth=2,
+            label=f"Regression-STRUT (selective{tau_str})")
     ax.axhline(results["baseline"], color="red", linestyle="--", linewidth=1.5,
                label=f"Source (no transfer): {results['baseline']:.2f}%")
     ax.set_xlabel("K  (calibration samples from target)")
     ax.set_ylabel("MAPE (%)")
-    ax.set_title(f"Transfer comparison\n{source_col}  →  {target_col}")
+    ax.set_title(f"Transfer comparison{tau_str}\n{source_col}  →  {target_col}")
     ax.legend()
     ax.grid(True, alpha=0.3)
     plt.tight_layout()
@@ -339,7 +395,7 @@ if __name__ == "__main__":
             X_source, y_source, test_size=0.2, random_state=42
         )
         rf_source = RandomForestRegressor(
-            n_estimators=300, max_depth=None, max_features=0.75,
+            n_estimators=50, max_depth=15, max_features=0.75,
             random_state=42, n_jobs=-1
         )
         rf_source.fit(Xtr, ytr)
@@ -348,12 +404,7 @@ if __name__ == "__main__":
         print(f"  Saved to {src_path}")
         evaluate_model(rf_source, Xte, yte, label="Source on source test set")
 
-    # Use a smaller subforest for STRUT (threshold search is O(n_trees × nodes × K))
-    # We slice estimators_ to keep runtime reasonable; MAPE impact is small.
-    print("\nUsing 50-tree subforest for Regression-STRUT (speed vs accuracy tradeoff)", flush=True)
-    rf_strut_base = copy.deepcopy(rf_source)
-    rf_strut_base.estimators_ = rf_strut_base.estimators_[:50]
-    rf_strut_base.n_estimators = 50
+    TAU = 0.1   # coverage threshold: update node only if >= 10% of K reach it
 
     X_cal, X_test_t, y_cal, y_test_t = train_test_split(
         X_target, y_target, test_size=0.2, random_state=42
@@ -361,7 +412,7 @@ if __name__ == "__main__":
 
     K = 100
     print(f"\n{'='*65}", flush=True)
-    print(f"Single transfer example  |  K={K}", flush=True)
+    print(f"Single transfer example  |  K={K}  tau={TAU}", flush=True)
     print(f"  {SOURCE_COL}  →  {TARGET_COL}", flush=True)
     print(f"{'='*65}", flush=True)
 
@@ -372,37 +423,34 @@ if __name__ == "__main__":
     rf_leaf = retarget_random_forest(rf_source, X_cal[:K], y_cal[:K], alpha=1.0)
     evaluate_model(rf_leaf, X_test_t, y_test_t, label="Leaf-retarget")
 
-    print(f"\nRegression-STRUT  (K={K}, λ=0.5, 50 trees):", flush=True)
+    print(f"\nRegression-STRUT (selective, K={K}, tau={TAU}, lambda=0.5):", flush=True)
     rf_strut = strut_regression_rf(
-        rf_strut_base, X_cal[:K], y_cal[:K],
-        min_samples_leaf=5, lambda_div=0.5,
+        rf_source, X_cal[:K], y_cal[:K],
+        y_source=y_source,
+        tau=TAU, lambda_div=0.5,
     )
     evaluate_model(rf_strut, X_test_t, y_test_t, label="Regression-STRUT")
 
-    tgt_safe     = TARGET_COL.replace("|", "_")
-    strut_path   = os.path.join(
+    tgt_safe  = TARGET_COL.replace("|", "_")
+    strut_path = os.path.join(
         MODEL_DIR, f"rf_{OP_TYPE}_{src_safe}_to_{tgt_safe}_strut_K{K}.joblib"
     )
     joblib.dump(rf_strut, strut_path)
     print(f"\n  Regression-STRUT model saved → {strut_path}", flush=True)
 
     print(f"\n{'='*65}", flush=True)
-    print("K-sweep  |  Leaf re-targeting vs Regression-STRUT  (50 trees each)", flush=True)
+    print(f"K-sweep  |  Leaf re-targeting vs Regression-STRUT (tau={TAU})", flush=True)
     print(f"{'='*65}", flush=True)
 
-    # Use 50-tree subforest for both methods for a fair comparison
-    rf_leaf_base = copy.deepcopy(rf_source)
-    rf_leaf_base.estimators_ = rf_leaf_base.estimators_[:50]
-    rf_leaf_base.n_estimators = 50
-
     results = k_sweep_comparison(
-        rf_strut_base, X_cal, y_cal, X_test_t, y_test_t,
+        rf_source, X_cal, y_cal, X_test_t, y_test_t,
+        y_source=y_source,
         k_values=[10, 25, 50, 100, 200, 500, 1000],
-        alpha=1.0, min_samples_leaf=5, lambda_div=0.5,
+        alpha=1.0, tau=TAU, lambda_div=0.5,
     )
 
     plot_path = os.path.join(
         RESULTS_DIR,
         f"strut_vs_leaf_{src_safe}_to_{tgt_safe}.png"
     )
-    plot_comparison(results, SOURCE_COL, TARGET_COL, save_path=plot_path)
+    plot_comparison(results, SOURCE_COL, TARGET_COL, tau=TAU, save_path=plot_path)
